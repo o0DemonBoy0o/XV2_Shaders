@@ -4,7 +4,7 @@ I'm still learning HLSL, so it may not be the best, but I did the best I could t
 "TOON_UNIF_Base.hlsl" is the basic body/clothing shader and has macros that can be used on compile to enable the various different shader types XV2 uses.
 
 Macros are:
-- DUSE_DFD
+- USE_DFD
 - USE_STAIN1
 - USE_STAIN2
 - USE_STAIN3
