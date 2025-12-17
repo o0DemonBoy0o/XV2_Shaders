@@ -14,5 +14,5 @@ Macros are:
 - USE_OWR
 - USE_NRP
 
-This isn't meant to compile into a perfect 1:1 copy of the original shaders, but to have something that still does exactly what the original do.
+This isn't meant to compile into a perfect 1:1 copy of the original shaders, but to have something that still does exactly what the originals do.
 at least as closely as I can manage with my experience.
