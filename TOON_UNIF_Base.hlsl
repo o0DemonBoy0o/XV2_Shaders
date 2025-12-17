@@ -128,38 +128,119 @@ cbuffer cb_ps_bool : register(b8)
 // Compiler Macros
 //-------------------------
 // Shader Modes
+
+/* Description:
+	Disables using a binary threshold on linework overlay.
+*/
+#ifndef DISABLE_LINEWORK_THRESHOLD
+    #define DISABLE_LINEWORK_THRESHOLD 0
+#endif
+
+/* Description:
+	Disables using a binary threshold on color mask (D2/XVM).
+*/
+#ifndef DISABLE_COLORMASK_THRESHOLD
+    #define DISABLE_COLORMASK_THRESHOLD 0
+#endif
+
+/* Description:
+	Enables Depth Fade calculation for use 
+	with setting threshold for linework overlay
+*/
+#ifndef USE_DFD
+    #define USE_DFD 0
+#endif
+
+/* Description:
+	Enables MatCol0R/G/B for 
+	coloring linework overlay mask.
+*/
+#ifndef USE_STAIN1
+    #define USE_STAIN1 0
+#endif
+
+/* Description:
+	An extention of STAIN1 that adds scratch damage support.
+	Uses MatCol1R/G/B for coloring scratch overlay mask.
+*/
 #ifndef USE_STAIN2
     #define USE_STAIN2 0
 #endif
 
+/* Description:
+	An extention of STAIN2 that adds blood damage support.
+	Uses MatCol2R/G/B for coloring scratch overlay mask.
+*/
 #ifndef USE_STAIN3
     #define USE_STAIN3 0
 #endif
 
+/* Description:
+	Enbles MatCol0A for setting base threshold
+	for linework overlay. (default 0.5)
+*/
 #ifndef USE_ATH
     #define USE_ATH 0
 #endif
 
+/* Description:
+	Enables per-channel light masking with a second texture.
+	R = Base Light | G = Rim Light | B = Shine Light
+	Light mask texture uses Image Sampler 2.
+*/
 #ifndef USE_MSK
     #define USE_MSK 0
 #endif
 
+/* Description:
+	Enables dual color ramp support.
+	2nd color is overlayed using a mask 
+	from linework overlay blue channel.
+*/
 #ifndef USE_D2
     #define USE_D2 0
 #endif
 
+/* Description:
+	Enables dual color ramp support.
+	2nd color is overlayed using a mask from a second texture.
+	Mask texture uses Image Sampler 2.
+*/
 #ifndef USE_XVM
     #define USE_XVM 0
 #endif
 
+/* Description:
+	Enables a decal texture to be applied as 
+	an overlay using the 2nd UV channel.
+	
+	Decal is clamped to only appear inside 0-1 UV bounds.
+	
+	Decal texture uses Image Sampler 2. 
+	If paied with USE_XVM or USE_MSK, 
+	then it uses Image Samler 3.
+*/
 #ifndef USE_MUD
     #define USE_MUD 0
 #endif
 
+/* Description:
+	Enables reading rimlight color from 
+	character DYT instead of stage DYT.
+	Uses 4th color ramp from DYT.
+	CANNOT be used with USE_D2/USE_XVM.
+*/
 #ifndef USE_OWR
     #define USE_OWR 0
 #endif
 
+/* Description:
+	Enables reading rimlight color from 
+	character DYT instead of stage DYT.
+	Uses 2nd color ramp from DYT.
+	Uses ramp alpha as strength.
+	Can ONLY be used with USE_D2/USE_XVM.
+*/
 #ifndef USE_NRP
     #define USE_NRP 0
 #endif
@@ -171,10 +252,6 @@ cbuffer cb_ps_bool : register(b8)
 
 #if USE_D2 && USE_XVM
     #error "D2 and XVM cannot be enabled at the same time!"
-#endif
-
-#if USE_STAIN2 && USE_STAIN3
-    #error "STAIN2 and STAIN3 cannot be enabled at the same time!"
 #endif
 
 #if USE_OWR && (USE_XVM || USE_D2 || USE_NRP)
@@ -720,7 +797,7 @@ void main(
 	float shineLight    = rimBiasedFacing;
 	float vfxShineLight = rimBiasedFacing * distanceFade;
 
-	// Modify light param based on light mask if MSK is enabled.
+	// Modify light param based on light mask if MSK is enabled
 	#if USE_MSK
 	float3 lightMask = Texture_ImageSampler2.Sample(State_ImageSampler2_s, UV0.xy).xyz;
 	
@@ -732,6 +809,8 @@ void main(
 	vfxShineLight *= lightMask.b;
 	#endif
 
+	// Get depth fade for use with threshold calculations later 
+	float depthFade = ComputeDepthFade(clipPosPS.w, viewVectorWS.w);
 
 //-------------------------
 //Base color
@@ -760,6 +839,11 @@ void main(
 		// Get color mask from secondary texture red channel (D2_XVM shader method)
 		#if USE_XVM
 			colorMask = Texture_ImageSampler2.Sample(State_ImageSampler2_s, UV0.xy).r;
+		#endif
+		
+		#if !DISABLE_COLORMASK_THRESHOLD
+			// Pixel visibility (either fully solid or invisible) based on threshold
+			colorMask = (colorMask >= (0.5 + depthFade)) ? 1.0 : 0.0;
 		#endif
 		
 		// Get secondary color ramp (character DYT)
@@ -975,45 +1059,59 @@ void main(
 //-------------------------
 //linework overlay
 //-------------------------
-	// Sample overlay texture (R=scratches, G=blood, A=ink/linework)
+	// Linework Overlay
 	float4 overlay = Texture_LineworkOverlay.Sample(State_LineworkOverlay_s, UV0.xy);
-    float inkMask     = overlay.a;
-    float scratchMask = 0.0;
-    float bloodMask   = 0.0;
+	float inkMask = overlay.a;
 
-	// Use masks for scratch/blood if enabled
-	// g_MaterialCol3_PS.x and g_MaterialCol3_PS.y are strength multipliers
-    LINEWORK_STAIN2( scratchMask = overlay.r * g_MaterialCol3_PS.x; )
-    LINEWORK_STAIN3( bloodMask   = overlay.g * g_MaterialCol3_PS.y; )
+	float thresholdStr = 0.5;
+	#if !DISABLE_LINEWORK_THRESHOLD
+		// Mask threshold
+		#if USE_ATH //use g_MaterialCol0_PS.w as threshold if ATH enabled
+			thresholdStr = g_MaterialCol0_PS.w;
+		#endif
 
-	// Depth-gate for line thickness
-	float inkThreshold = ComputeDepthFade(clipPosPS.w, viewVectorWS.w);
-	float strength = 0.5;
-    LINEWORK_ATH(strength = g_MaterialCol0_PS.w;)
+		// Modify using depth fade
+		#if USE_DFD 
+			thresholdStr = thresholdStr + depthFade;
+		#endif
 
-    inkThreshold = strength + inkThreshold;
-    inkMask = (inkMask >= inkThreshold) ? 1.0 : 0.0;
+		// Pixel visibility (either fully solid or invisible) based on threshold
+		inkMask = (inkMask >= thresholdStr) ? 1.0 : 0.0;
+	#endif
 
-    // Three-stage overlay | Linework > scratch > blood
-    float3 inkLayer = lerp(WHITE, g_MaterialCol0_PS.rgb, inkMask);
+	float3 finalLayer = overlay.rgb;
+	// Combine and color layers based on EMM params if STAIN type
+	#if USE_STAIN1 || USE_STAIN2 || USE_STAIN3
+		float3 firstLayer;
+		float scratchMask = 0.0;
+		
+		float3 secondLayer;
+		float bloodMask   = 0.0;
+		
+		// Use masks for scratch/blood if enabled
+		LINEWORK_STAIN2( scratchMask = overlay.r * g_MaterialCol3_PS.x; )
+		LINEWORK_STAIN3( bloodMask   = overlay.g * g_MaterialCol3_PS.y; )
+
+		// Three-stage overlay | Linework > scratch > blood
+		firstLayer = lerp(WHITE, g_MaterialCol0_PS.rgb, inkMask);
+
+		secondLayer = firstLayer;
+		LINEWORK_STAIN2(secondLayer = lerp(firstLayer, g_MaterialCol1_PS.rgb, scratchMask));
 	
-	float3 scratchLayer = inkLayer;
-    LINEWORK_STAIN2(scratchLayer = lerp(inkLayer, g_MaterialCol1_PS.rgb, scratchMask));
+		finalLayer = secondLayer;
+		LINEWORK_STAIN3(finalLayer = lerp(secondLayer, g_MaterialCol2_PS.rgb, bloodMask));
+	#endif
+
+	// Apply to base color
+	float3 lineColor = baseColor.rgb * finalLayer;
 	
-	float3 bloodLayer = scratchLayer;
-    LINEWORK_STAIN3(bloodLayer = lerp(scratchLayer, g_MaterialCol2_PS.rgb, bloodMask));
-
-    // Apply to base color
-    float3 lineColor = baseColor.rgb * bloodLayer;
-
     // Faded look for HC Shading
 	// g_vParam11_PS.y is a strength modifier and only has a valid value when in the HC.
-    float contribution = overlay.a;
-	LINEWORK_STAIN2(contribution += bloodLayer.r;)
-	LINEWORK_STAIN3(contribution += bloodLayer.g;)
+    float contribution = lineColor.r + lineColor.g;
+	contribution = (baseColor.b * finalLayer.b) + contribution;
 
     bool suppressInk = (contribution <= 0.1);
-    float3 fadedInk = lerp(lineColor, inkThreshold * g_vParam11_PS.yyy, suppressInk);
+    float3 fadedInk = lerp(lineColor, thresholdStr * g_vParam11_PS.yyy, suppressInk);
 
     // Lighting mode selection
     baseColor.rgb =  ENABLE_INK_SPEC ? fadedInk : lineColor;
