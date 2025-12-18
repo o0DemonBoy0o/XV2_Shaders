@@ -1,3 +1,5 @@
+// By DA (DemonBoy)
+
 cbuffer ps_stage_cb : register(b0)
 {
   float4 g_vShadowMap_PS : packoffset(c0);
@@ -152,6 +154,23 @@ cbuffer cb_ps_bool : register(b8)
 #endif
 
 /* Description:
+	Enables light intensity modification with a second texture.
+	R = Base Light | G = Rim Light | B = Shine Light
+	Light mask texture uses Image Sampler 2.
+*/
+#ifndef USE_HAIR
+    #define USE_HAIR 0
+#endif
+
+/* Description:
+	Enables shine/glow(?) modification using MatOffset1X/Y/Z.
+	Note: Not to be confused with STAIN.
+*/
+#ifndef USE_STN
+    #define USE_STN 0
+#endif
+
+/* Description:
 	Enables MatCol0R/G/B for 
 	coloring linework overlay mask.
 */
@@ -250,6 +269,10 @@ cbuffer cb_ps_bool : register(b8)
     #error "MSK and XVM cannot be enabled at the same time!"
 #endif
 
+#if USE_HAIR && (USE_MSK || USE_XVM)
+    #error "HAIR and XVM/MSK cannot be enabled at the same time!"
+#endif
+
 #if USE_D2 && USE_XVM
     #error "D2 and XVM cannot be enabled at the same time!"
 #endif
@@ -293,18 +316,24 @@ cbuffer cb_ps_bool : register(b8)
     #define PS_TEXCOORD11_INPUT
 #endif
 
+// Include the use of the lightDirOff input when enabled
+#if USE_HAIR
+    #define PS_TEXCOORD3_INPUT float4 lightDirOff : TEXCOORD3,
+#else
+    #define PS_TEXCOORD3_INPUT
+#endif
 
 //linework emb
 Texture2D<float4> Texture_LineworkOverlay : register(t1);
 SamplerState State_LineworkOverlay_s : register(s1);
 
 // Enable use of extra images for shaders that need it
-#if USE_MSK || USE_XVM || USE_MUD
+#if USE_MSK || USE_XVM || USE_MUD || USE_HAIR
 	Texture2D<float4> Texture_ImageSampler2 : register(t2);
 	SamplerState State_ImageSampler2_s : register(s2);
 #endif
 
-#if USE_MUD && (USE_XVM || USE_MSK)
+#if USE_MUD && (USE_XVM || USE_MSK || USE_HAIR)
 	Texture2D<float4> Texture_ImageSampler3 : register(t3);
 	SamplerState State_ImageSampler3_s : register(s3);
 #endif
@@ -685,7 +714,7 @@ void main(
   float4 UV0 		    : TEXCOORD0,
   float4 worldNormal    : TEXCOORD1,
   float4 viewVectorWS   : TEXCOORD2,
-  //TEXCOORD3 is something relating to Hair shaders
+  PS_TEXCOORD3_INPUT	//contains lighting warp variable from Hair shaders
   float4 worldPos 		: TEXCOORD4,
   //TEXCOORD5 is something relating to ENV shaders
   float4 clipPosPS 		: TEXCOORD6,
@@ -762,55 +791,72 @@ void main(
 
 
 //-------------------------
-//light calculation
+//Light Calculation
 //-------------------------
-	// Shared normalized vectors
-	float3 normalN   = normalize(worldNormal.xyz);
+	// Distance calculations for vfx/additional light sources
+	float3 LightPos = g_vParam5_PS.xyz - worldPos.xyz;
+	float dist      = length(LightPos);
+	float distFade  = (dist - g_vParam4_PS.x) / (g_vParam4_PS.y - g_vParam4_PS.x);
+	distFade        = saturate(1.0 - distFade);
+
+	// Shared normalizations
 	float3 viewDirN  = normalize(viewVectorWS.xyz);
 	float3 lightDirN = normalize(lightDirWS.xyz);
 	float3 rimDirN   = normalize(rimDirWS.xyz);
-	float3 rampBasis;
-	rampBasis.xy = UV0.zw;
-	rampBasis.z  = worldNormal.w;
-	rampBasis    = normalize(rampBasis);
+	float3 LightPosN = normalize(LightPos);
+	float3 normalN   = normalize(worldNormal.xyz);
+	float3 rampBaseN = normalize(float3(UV0.zw, worldNormal.w));
 
-	// Distance attenuation
-	float3 toLightPos  = g_vParam5_PS.xyz - worldPos.xyz;
-	float distSq       = dot(toLightPos, toLightPos);
-	float dist         = sqrt(distSq);
-	float distanceFade = (dist - g_vParam4_PS.x) / (g_vParam4_PS.y - g_vParam4_PS.x);
-	distanceFade = saturate(1.0 - distanceFade);
+	// Base lighting positions
+	float lightRaw  = 1.0 - dot(rimDirN, rampBaseN);
+
+	// Alternate lighting Dir for rimlight/vfx rimlight if enabled
+	float3 rimLightDirN   = rimDirN;
+	float3 vxfRimLightDir = viewDirN;
+	#if USE_HAIR
+		rimLightDirN   = normalize(rimDirN  + lightDirOff.xyz);
+		vxfRimLightDir = normalize(viewDirN + lightDirOff.xyz);
+	#endif
+
+	float baseLight = saturate(0.5 * (1.0 + dot(rampBaseN, lightDirN)));
+	float rimLight  = saturate(1 - dot(rimLightDirN, rampBaseN)); 
+
+	// Shine light type and positions
+	float3 hcShine      = normalize(rimDirN + g_vParam12_PS.xyz);
+	float3 normalShine  = normalize(lightDirN + rimDirN);
+	float3 shineFacing  = ENABLE_SHINE_SPEC ? hcShine : normalShine;
+	float shineLight    = saturate(dot(shineFacing, rampBaseN));
 	
-	// Core dot products
-	float3 rimBiasedDir = ENABLE_SHINE_SPEC ? normalize(rimDirN + g_vParam12_PS.xyz) : normalize(lightDirN + rimDirN);
-	float rimBiasedFacing = saturate(dot(rimBiasedDir, rampBasis));	
-	float lightRaw 	      = 1.0 - dot(rimDirN, rampBasis); //r7.w
-	float lightFacing     = saturate(0.5 * (1.0 + dot(rampBasis, lightDirN)));
-	float viewFacing      = saturate(1.0 - dot(viewDirN, normalN));
-	float rimFacing       = saturate(lightRaw);
+	// Vfx lighting positions
+	float vfxbasePos = saturate(0.5 * (1.0 + dot(normalN, LightPosN)));
+	float vfxLight   = vfxbasePos * distFade;
 
-	// Used mostly for color ramp U coordinates
-	float baseLight     = lightFacing;
-	float vfxlight      = lightFacing * distanceFade;
-	float rimLight      = rimFacing;
-	float vfxRimLight   = viewFacing * distanceFade;
-	float shineLight    = rimBiasedFacing;
-	float vfxShineLight = rimBiasedFacing * distanceFade;
+	float vfxRimPos   = saturate(1 - dot(vxfRimLightDir, normalN));
+	float vfxRimLight = vfxRimPos * distFade;
 
-	// Modify light param based on light mask if MSK is enabled
-	#if USE_MSK
-	float3 lightMask = Texture_ImageSampler2.Sample(State_ImageSampler2_s, UV0.xy).xyz;
+	// Vfx Shine position
+	float3 hcVfxShine     = normalize(viewDirN + g_vParam12_PS.xyz);
+	float3 normalVfxShine = normalize(viewDirN + LightPosN);
+	float3 vfxShineFacing = ENABLE_SHINE_SPEC ? hcVfxShine : normalVfxShine;
 	
-	baseLight     *= lightMask.r;
-	vfxlight      *= lightMask.r;
-	rimLight      *= lightMask.g;
-	vfxRimLight   *= lightMask.g;
-	shineLight    *= lightMask.b;
-	vfxShineLight *= lightMask.b;
+	float vfxShinePos   = saturate(dot(vfxShineFacing, normalN));
+	float vfxShineLight = vfxShinePos * distFade;
+
+	#if USE_MSK || USE_HAIR
+		float3 lightTex = Texture_ImageSampler2.Sample(State_ImageSampler2_s, UV0.xy).xyz;
+
+		baseLight     *= lightTex.r;
+		rimLight      *= lightTex.g;
+		shineLight    *= lightTex.b;
+		
+		vfxLight      *= lightTex.r;
+		vfxRimLight   *= lightTex.g;
+		vfxShineLight *= lightTex.b;
 	#endif
 
 	// Get depth fade for use with threshold calculations later 
 	float depthFade = ComputeDepthFade(clipPosPS.w, viewVectorWS.w);
+
 
 //-------------------------
 //Base color
@@ -907,7 +953,7 @@ void main(
 
 
 //-------------------------
-//rimlight + effect lighting
+//Rimlight + effect lighting
 //-------------------------
 	// Get rimlight param ramp (Character DYT)
 	// Not used as color, instead used as strength for each actual rimlight color ramp.
@@ -938,13 +984,13 @@ void main(
 		float3 rimRamp1 = SampleToonRamp(
 							Texture_ToonRimlight, 
 							State_ToonRimlight_s, 
-							float2(rampBasis.y * 0.5 + 0.5, 0.25), 
+							float2(rampBaseN.y * 0.5 + 0.5, 0.25), 
 							false).rgb;
 
 		float3 rimRamp2 = SampleToonRamp(
 							Texture_ToonRimlight, 
 							State_ToonRimlight_s, 
-							float2(rampBasis.x * 0.5 + 0.5, 0.75), 
+							float2(rampBaseN.x * 0.5 + 0.5, 0.75), 
 							false).rgb;
 	#endif
 
@@ -952,7 +998,7 @@ void main(
 	float3 baseEffLighting = SampleToonRamp(
 								Texture_ToonOtherLight, 
 								State_ToonOtherLight_s, 
-								float2(vfxlight, matIndex + dytRamp[0]), 
+								float2(vfxLight, matIndex + dytRamp[0]), 
 								ENABLE_RAMP_SMOOTHING).rgb;
 
 	// Get secondary color effect ramp (lighting/cmn DYT)
@@ -960,7 +1006,7 @@ void main(
 	float3 baseEffLighting2 = SampleToonRamp(
 								Texture_ToonOtherLight, 
 								State_ToonOtherLight_s, 
-								float2(vfxlight, matIndex + dytRamp[3]), 
+								float2(vfxLight, matIndex + dytRamp[3]), 
 								//Note: This is actually always false for the vanilla shaders.
 								//Due to the likeliness of it being a bug, 
 								//we'll allow it it to be smoothed as well
@@ -1036,12 +1082,12 @@ void main(
 		// Final blend
 		float2 rimStr2 = float2(0,0);
 		#if !USE_NRP
-			rimStr = rimParam.xy;
+			rimStr2 = rimParam.xy;
 		#else
-			rimStr = float2(rimRamp.w,rimLight.x);
+			rimStr2 = float2(rimRamp.w,rimLight.x);
 		#endif
 		
-		float3 finalColorA = BlendToonColor(toonColor, baseColor.rgb, rimStr, baseLuminance, mergedRim);
+		float3 finalColorA = BlendToonColor(toonColor, baseColor.rgb, rimStr2, baseLuminance, mergedRim);
 
 		// Lighting modifiers
 		float3 lightMod1 = g_vColor0_PS.rgb * g_vColor0_PS.a;
@@ -1057,7 +1103,7 @@ void main(
 
 
 //-------------------------
-//linework overlay
+//Linework overlay
 //-------------------------
 	// Linework Overlay
 	float4 overlay = Texture_LineworkOverlay.Sample(State_LineworkOverlay_s, UV0.xy);
@@ -1117,7 +1163,7 @@ void main(
     baseColor.rgb =  ENABLE_INK_SPEC ? fadedInk : lineColor;
 	
 //-------------------------
-//shine ramp overlay
+//Shine ramp overlay
 //-------------------------
 	// Get base shine color ramp (Character DYT)
 	float3 baseShine = SampleToonRamp(
@@ -1146,22 +1192,38 @@ void main(
 	shineBaseColor = baseColor.rgb + shineBaseColor;
 
 	// Setup specular style shine (for HC shading)
-	float attenuation = min(1.0f, exp2(log2(rimBiasedFacing) * g_vParam13_PS.x));
+	#if USE_MSK || USE_HAIR
+		shineLight = saturate(shineLight);
+	#endif
+	
+	float attenuation = min(1.0f, exp2(log2(shineLight) * g_vParam13_PS.x));
 	float3 shineSpecColor = shineBaseColor + attenuation * g_vParam13_PS.y;
 
 	// Choose beween specuar or normal shine
-	float3 shineColor = ENABLE_SHINE_SPEC ? shineSpecColor : shineBaseColor;//r5
+	float3 shineColor = ENABLE_SHINE_SPEC ? shineSpecColor : shineBaseColor;
 
-	// Setup fade color
-	float3 fadeColor = g_vFadeRim_PS.xyz * lightRaw;
-	fadeColor += shineColor * g_vFadeMulti_PS.xyz;
-	fadeColor += g_vFadeAdd_PS.xyz;
+	// Setup fade param
+	float3 fadeRim   = g_vFadeRim_PS.xyz;
+	float3 fadeMulti = g_vFadeMulti_PS.xyz;
+	float3 fadeAdd   = g_vFadeAdd_PS.xyz;
+	
+	#if USE_STN
+		fadeRim   *= g_MaterialOffset1_PS.y;
+		fadeMulti *= g_MaterialOffset1_PS.x;
+		fadeAdd   *= g_MaterialOffset1_PS.z;
+	#else
+		fadeRim *= lightRaw;
+	#endif
+	
+	float3 fadeColor = fadeRim;
+	fadeColor += shineColor * fadeMulti;
+	fadeColor += fadeAdd;
 
 	// Final blend
 	baseColor.rgb = shineColor + g_vFadeMulti_PS.w * (fadeColor - shineColor);
 
 //-------------------------
-//final color pass and output cmp
+//Final color pass and output
 //-------------------------
 	// Setup glow effect overlay/color
 	float glowAlpha = g_vColor4_PS.w * baseColor.a;
@@ -1174,9 +1236,14 @@ void main(
 	glowColor.rgb = g_vColor4_PS.rgb * lumaRebalanced;
 	float3 defaultColor = ENABLE_GLOW_COLOR ? glowColor.rgb : baseColor.rgb;
 
-	float distFade = pow(rimFacing, g_vParam8_PS.z);
-	glowColor = g_vColor4_PS * distFade;
-	glowColor = saturate(glowColor * g_vParam8_PS.y + float4(defaultColor, defaultAlpha));
+	//skip distance calculation if STN shader
+	#if !USE_STN
+		float distanceFade = pow(rimLight, g_vParam8_PS.z);
+		glowColor = g_vColor4_PS * distanceFade;
+		glowColor = saturate(glowColor * g_vParam8_PS.y + float4(defaultColor, defaultAlpha));
+	#else
+		glowColor = saturate(float4(defaultColor, defaultAlpha));
+	#endif
 
 	float4 tempColor = ENABLE_GLOW ? glowColor : float4(defaultColor, defaultAlpha);
 
