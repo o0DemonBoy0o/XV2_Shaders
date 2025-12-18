@@ -5,6 +5,8 @@ I'm still learning HLSL, so it may not be the best, but I did the best I could t
 
 Macros are:
 - USE_DFD
+- USE_HAIR
+- USE_STN
 - USE_STAIN1
 - USE_STAIN2
 - USE_STAIN3
@@ -18,6 +20,6 @@ Macros are:
 - DISABLE_LINEWORK_THRESHOLD
 - DISABLE_COLORMASK_THRESHOLD
 
-Compiling without any of these will create a shader equal to the game's "TOON_UNIF_DFD" shader.
+Compiling without any of these should create a shader equal to the game's "TOON_UNIF_DFD" shader.
 This isn't meant to compile into a perfect 1:1 copy of the original shaders, but to have something that still does exactly what the originals do.
 at least as closely as I can manage with my experience.
