@@ -209,6 +209,46 @@ cbuffer cb_ps_bool : register(b8)
 #endif
 
 /* Description:
+	Enables dual color ramp support.
+	2nd color is overlayed using a mask
+	from main texture Blue channel.
+	Also enables MatCol3A for setting thickness threshold.
+*/
+#ifndef USE_MUT0
+    #define USE_MUT0 0
+#endif
+
+/* Description:
+	An extention of MUT0 that overlays linework
+	using main texture Alpha channel.
+	MatCol0A used for setting thickness threshold.
+	MatCol0R/G/B used for setting color.
+*/
+#ifndef USE_MUT1
+    #define USE_MUT1 0
+#endif
+
+/* Description:
+	An extention of MUT1 that overlays 2nd linework
+	using main texture Red channel.
+	MatCol1A used for setting thickness threshold.
+	MatCol1R/G/B used for setting color.
+*/
+#ifndef USE_MUT2
+    #define USE_MUT2 0
+#endif
+
+/* Description:
+	An extention of MUT2 that overlays 3rd linework
+	using main texture Green channel.
+	MatCol2A used for setting thickness threshold.
+	MatCol2R/G/B used for setting color.
+*/
+#ifndef USE_MUT3
+    #define USE_MUT3 0
+#endif
+
+/* Description:
 	Enbles MatCol0A for setting base threshold
 	for linework overlay. (default 0.5)
 */
@@ -232,6 +272,15 @@ cbuffer cb_ps_bool : register(b8)
 */
 #ifndef USE_D2
     #define USE_D2 0
+#endif
+
+/* Description:
+	Enables tri color ramp support.
+	2nd and 3rd color is overlayed using a mask 
+	from main texture blue and green channels.
+*/
+#ifndef USE_D3
+    #define USE_D3 0
 #endif
 
 /* Description:
@@ -278,6 +327,18 @@ cbuffer cb_ps_bool : register(b8)
     #define USE_NRP 0
 #endif
 
+/* Description:
+	Outputs clipPos data to SV_TARGET2.
+	Full purpose for this is unknown.
+*/
+#ifndef USE_0038
+    #define USE_0038 0
+#endif
+
+#if USE_MUT0 || USE_MUT1 || USE_MUT2 || USE_MUT3 ||USE_MUT0d3 || USE_MUT1d3 || USE_MUT2d3
+	#define USE_EYE 1
+#endif
+
 // Compatability Checks
 #if USE_MSK && USE_XVM
     #error "MSK and XVM cannot be enabled at the same time!"
@@ -295,13 +356,24 @@ cbuffer cb_ps_bool : register(b8)
     #error "OWR and D2/XVM/NRP cannot be enabled at the same time!"
 #endif
 
-#if USE_NRP && (!USE_XVM && !USE_D2)
-    #error "NRP can only be used with XVM/D2! Use OWR for other types."
+#if USE_NRP && (!USE_XVM && !USE_D2 && !USE_EYE)
+    #error "NRP can only be used with XVM/D2/MUT! Use OWR for other types."
+#endif
+
+#if USE_EYE && (USE_STAIN1 || USE_STAIN2 || USE_STAIN3)
+    #error "MUT and STAIN cannot be enabled at the same time!"
+#endif
+
+#if USE_EYE && (USE_D2 || USE_XVM)
+    #error "MUT and D2/XVM cannot be enabled at the same time!"
+#endif
+
+#if USE_D3 && !USE_EYE
+    #error "D3 can only be used with MUT1-3!"
 #endif
 
 // Other Helper Macros
 #define rampStep g_vParam12_PS.w
-//#define matIndex g_MaterialScale1_PS.x * 0.125
 #define WHITE float3(1,1,1)
 
 #if USE_STAIN2 || USE_STAIN3
@@ -316,18 +388,22 @@ cbuffer cb_ps_bool : register(b8)
     #define LINEWORK_STAIN3(expr)
 #endif
 
+#if USE_MUT2 || USE_MUT3
+    #define LINEWORK_MUT2(expr) expr
+#else
+    #define LINEWORK_MUT2(expr)
+#endif
+
+#if USE_MUT3
+    #define LINEWORK_MUT3(expr) expr
+#else
+    #define LINEWORK_MUT3(expr)
+#endif
+
 #if USE_ATH
     #define LINEWORK_ATH(expr) expr
 #else
     #define LINEWORK_ATH(expr)
-#endif
-
-// Include the use of the 2nd UV map input when enabled
-// Note: FASPC and DBL_ACS shaders use this too
-#if USE_MUD
-    #define PS_TEXCOORD11_INPUT float4 UV1 : TEXCOORD11,
-#else
-    #define PS_TEXCOORD11_INPUT
 #endif
 
 // Include the use of the lightDirOff input when enabled
@@ -344,6 +420,20 @@ cbuffer cb_ps_bool : register(b8)
     #define PS_TEXCOORD4_INPUT float4 worldPos : TEXCOORD4,
 #endif
 
+// Include the use of the 2nd UV map input when enabled
+// Note: FASPC and DBL_ACS shaders use this too
+#if USE_MUD
+    #define PS_TEXCOORD11_INPUT float4 UV1 : TEXCOORD11,
+#else
+    #define PS_TEXCOORD11_INPUT
+#endif
+
+// Enables unknown output of clipPos to SV_TARGET2
+#if USE_0038
+    #define PS_SV_TARGET2_OUTPUT out float4 output2 : SV_TARGET2,
+#else
+    #define PS_SV_TARGET2_OUTPUT
+#endif
 
 //linework emb
 Texture2D<float4> Texture_LineworkOverlay : register(t1);
@@ -382,12 +472,7 @@ SamplerState State_LineworkOverlay_s : register(s1);
 #endif
 
 
-float3 ComputeToonSteps(
-    float3 color,
-    float3 channelOffset,
-    float maxVal,
-    float range
-)
+float3 ComputeToonSteps(float3 color, float3 channelOffset, float maxVal, float range)
 {
     float3 steps = (maxVal - color.zxy) / range;
     steps = steps - steps.zxy + channelOffset;
@@ -396,12 +481,7 @@ float3 ComputeToonSteps(
     return steps * mask;
 }
 
-float3 ApplyToonRamp(
-    float step,
-    float rampFactor,
-    float maxVal,
-    float3 baseColor
-)
+float3 ApplyToonRamp(float step, float rampFactor, float maxVal, float3 baseColor)
 {
     float3 t = step.xxx * float3(6,6,6) + float3(-3,-2,-4);
     t = saturate(abs(t) * float3(1,-1,-1) + float3(-1,2,2)) - 1.0f;
@@ -409,23 +489,14 @@ float3 ApplyToonRamp(
     return t * maxVal - baseColor;
 }
 
-float3 BlendToonColor(
-    float3 toonColor,
-    float3 baseColor,
-    float2 rimMask,
-    float3 luminance,
-    float3 mergeColor
-)
+float3 BlendToonColor(float3 toonColor, float3 baseColor, float2 rimMask, float3 luminance, float3 mergeColor)
 {
     float3 c = rimMask.yyy * toonColor + baseColor;
     c = (c - mergeColor) * luminance + mergeColor;
     return (c - baseColor) * rimMask.xxx + baseColor;
 }
 
-float ComputeDepthFade(
-    float clipDepth,
-    float viewTerm
-)
+float ComputeDepthFade(float clipDepth, float viewTerm)
 {
 	float4 depthParams = g_vParam7_PS;
 	float viewScale = g_MaterialScale1_PS.w;
@@ -444,12 +515,7 @@ float ComputeDepthFade(
     return fade * viewFade + viewBias;
 }
 
-float4 SampleToonRamp(
-    Texture2D dytRamp,
-    SamplerState dytSample,
-    float2 uv,
-    bool enableSmoothing
-)
+float4 SampleToonRamp(Texture2D dytRamp, SamplerState dytSample, float2 uv, bool enableSmoothing)
 {
     // base ramp
     float4 color = dytRamp.Sample(dytSample, uv);
@@ -752,6 +818,7 @@ void main(
   float4 materialMode   : TEXCOORD15,
   //TEXCOORD16 is something relating to DBL_ACS shaders
   //TEXCOORD17 is something relating to DBL_ACS shaders
+  PS_SV_TARGET2_OUTPUT
   out float4 colorOut 	: SV_TARGET0,
   out float4 glareOut 	: SV_TARGET1)
 {
@@ -782,10 +849,10 @@ void main(
 // Screen pixel and discard logic
 //-------------------------
 	//Clip-space position to screen-space pixel coordinates
-	float2 screenPos = clipPosPS.xy / clipPosPS.w;
-	screenPos = screenPos * 0.5 + 0.5;
-	screenPos = screenPos * screenParams.xy + 0.01;
-	uint2 screenPixel = uint2(round(screenPos));
+	float3 screenPos = clipPosPS.xyz / clipPosPS.www;
+	screenPos.xy = screenPos.xy * 0.5 + 0.5;
+	screenPos.xy = screenPos.xy * screenParams.xy + 0.01;
+	uint2 screenPixel = uint2(round(screenPos.xy));
 
 	// Tile dimensions and index
 	uint2 tileDim = uint2(g_vParam9_PS.xy + g_vParam9_PS.zw); // tile width/height
@@ -885,7 +952,7 @@ void main(
 		float vfxShineLight = vfxShinePos * distFade;
 	#endif
 
-	#if USE_MSK || USE_HAIR
+    #if USE_MSK || USE_HAIR
 		float3 lightTex = Texture_ImageSampler2.Sample(State_ImageSampler2_s, UV0.xy).xyz;
 
 		baseLight     *= lightTex.r;
@@ -923,7 +990,7 @@ void main(
 //Secondary Color Overlay
 //-------------------------
 	// Get and apply second color only when enabled
-	#if USE_D2 || USE_XVM
+	#if USE_D2 || USE_XVM || (USE_EYE && !USE_D3)
 
 		// Get color mask from main texture blue channel (Basic D2 shader method)
 		float colorMask = Texture_LineworkOverlay.Sample(State_LineworkOverlay_s, UV0.xy).b;
@@ -934,8 +1001,14 @@ void main(
 		#endif
 		
 		#if !DISABLE_COLORMASK_THRESHOLD
+			float maskThr = 0.5;
+	
+			#if USE_EYE
+				maskThr = g_MaterialCol3_PS.w;
+			#endif
+			
 			// Pixel visibility (either fully solid or invisible) based on threshold
-			colorMask = (colorMask >= (0.5 + depthFade)) ? 1.0 : 0.0;
+			colorMask = (colorMask >= (maskThr + depthFade)) ? 1.0 : 0.0;
 		#endif
 		
 		// Get secondary color ramp (character DYT)
@@ -950,13 +1023,59 @@ void main(
 	
 		// Modifies color if flag is set. Usually for colorable clothing/CaCs
 		if (ENABLE_COLOR_MOD)
-			subColor = ApplyColorMod(subColor, g_vColor11_PS, (int)materialMode.x);
+			subColor = ApplyColorMod(subColor, g_vColor8_PS, (int)materialMode.x);
 		
 		// Overlay second color over base color using mask
 		baseColor = lerp(baseColor, subColor, colorMask);
 
-	#endif
+	#elif USE_D3
+	
+		// Get color masks from main texture G/B channel (Basic D3 shader method)
+		float2 colorMask = Texture_LineworkOverlay.Sample(State_LineworkOverlay_s, UV0.xy).gb;
+		
+		#if !DISABLE_COLORMASK_THRESHOLD
+		
+		    float2 maskThr = depthFade.xx;
+			maskThr.x += g_MaterialCol3_PS.w;
+			maskThr.y += g_MaterialCol2_PS.w;
 
+			// Pixel visibility (either fully solid or invisible) based on threshold
+			colorMask = (colorMask >= maskThr) ? 1.0 : 0.0;
+		
+		#endif
+		
+		// Offset U coord correctly for subColor1 and subColor2
+		float2 dualRampU = baseLight.xx * float2(-0.5, 0.5) + float2(0.5, 0.5);
+		
+		// Get secondary color from first half of color ramp
+		float4 subColor1 = SampleToonRamp(
+								Texture_ToonColors,
+								State_ToonColors_s,
+								float2(dualRampU.y, matIndex + rampIndex[3]),
+								false);
+		
+		// Modifies color if flag is set. Usually for colorable clothing/CaCs
+		if (ENABLE_COLOR_MOD)
+		    subColor1 = ApplyColorMod(subColor1, g_vColor11_PS, (int) materialMode.x);
+		
+		// Get third color from second half of color ramp
+		float4 subColor2 = SampleToonRamp(
+								Texture_ToonColors,
+								State_ToonColors_s,
+								float2(dualRampU.x, matIndex + rampIndex[3]),
+								false);
+		
+		// Modifies color if flag is set. Usually for colorable clothing/CaCs
+		if (ENABLE_COLOR_MOD)
+		    subColor2 = ApplyColorMod(subColor2, g_vColor11_PS, (int) materialMode.x);
+		
+		
+		baseColor = lerp(baseColor, subColor1, colorMask.x);
+		baseColor = lerp(baseColor, subColor2, colorMask.y);
+
+	#endif
+	
+	
 
 //-------------------------
 //Base luminance (Rec.601)
@@ -1061,7 +1180,24 @@ void main(
 									//we'll allow it it to be smoothed as well
 									ENABLE_RAMP_SMOOTHING).rgb;
 		#endif
-
+	
+		#if USE_D3 || true
+	
+		float2 dualEffRampU = vfxLight.xx * float2(-0.5, 0.5) + float2(0.5, 0.5);
+	
+		float3 baseEffLighting2 = SampleToonRamp(
+										Texture_ToonOtherLight,
+										State_ToonOtherLight_s,
+										float2(dualEffRampU.x, matIndex + rampIndex[3]),
+										false).rgb;
+		
+		float3 baseEffLighting3 = SampleToonRamp(
+										Texture_ToonOtherLight,
+										State_ToonOtherLight_s,
+										float2(dualEffRampU.y, matIndex + rampIndex[3]),
+										false).rgb;
+		#endif
+	
 		// Get effect rimlight from lighting/cmn dyt
 		// This is technically unused because the ramps for this in the cmn dyt are black.
 		float3 rimEffLighting = SampleToonRamp(
@@ -1140,6 +1276,11 @@ void main(
 			#if USE_D2 || USE_XVM || USE_NRP
 				baseEffLighting = lerp(baseEffLighting, baseEffLighting2, colorMask);
 			#endif
+
+			#if USE_D3
+				baseEffLighting = lerp(baseEffLighting, baseEffLighting2, colorMask.x);
+				baseEffLighting = lerp(baseEffLighting, baseEffLighting3, colorMask.y);
+			#endif
 			
 			float3 lightMod1 = g_vColor0_PS.rgb * g_vColor0_PS.a;
 			float3 lightMod2 = g_vColor1_PS.rgb * g_vColor1_PS.a;
@@ -1160,61 +1301,93 @@ void main(
 //Linework overlay
 //-------------------------
 	// Linework Overlay
-	float4 overlay = Texture_LineworkOverlay.Sample(State_LineworkOverlay_s, UV0.xy);
-	float inkMask = overlay.a;
+    float4 overlay = Texture_LineworkOverlay.Sample(State_LineworkOverlay_s, UV0.xy);
+    float3 firstLayer;
+    float3 secondLayer;
+    float3 finalLayer = overlay.rgb;
+    float thresholdStr = 0.5;
+	
+	#if !USE_EYE
+		// Combine and color layers based on EMM params if STAIN type
+		#if USE_STAIN1 || USE_STAIN2 || USE_STAIN3
+			float inkMask = overlay.a;
+			float scratchMask = 0.0;
+			float bloodMask   = 0.0;
+	
+			// Mask threshold
+			#if !DISABLE_LINEWORK_THRESHOLD
+	
+				//use g_MaterialCol0_PS.w as threshold if ATH enabled
+				#if USE_ATH 
+					thresholdStr = g_MaterialCol0_PS.w;
+				#endif
+	
+				// Modify using depth fade
+				#if USE_DFD 
+					thresholdStr = thresholdStr + depthFade;
+				#endif
+				
+				// Pixel visibility (either fully solid or invisible) based on threshold
+				inkMask = (inkMask >= thresholdStr) ? 1.0 : 0.0;
+			#endif
 
-	float thresholdStr = 0.5;
-	#if !DISABLE_LINEWORK_THRESHOLD
+			// Use masks for scratch/blood if enabled
+			LINEWORK_STAIN2( scratchMask = overlay.r * g_MaterialCol3_PS.x; )
+			LINEWORK_STAIN3( bloodMask   = overlay.g * g_MaterialCol3_PS.y; )
+
+			// Three-stage overlay | Linework > scratch > blood
+			firstLayer = lerp(WHITE, g_MaterialCol0_PS.rgb, inkMask);
+
+			secondLayer = firstLayer;
+			LINEWORK_STAIN2(secondLayer = lerp(firstLayer, g_MaterialCol1_PS.rgb, scratchMask));
+
+			finalLayer = secondLayer;
+			LINEWORK_STAIN3(finalLayer = lerp(secondLayer, g_MaterialCol2_PS.rgb, bloodMask));
+		#endif
+
+
+	// Eye Overlay
+	#else
+		#if !USE_MUT0
+		float3 eyeMask1 = overlay.a;
+		float3 eyeMask2 = overlay.r;
+		float3 eyeMask3 = overlay.g;
+	
 		// Mask threshold
-		#if USE_ATH //use g_MaterialCol0_PS.w as threshold if ATH enabled
-			thresholdStr = g_MaterialCol0_PS.w;
-		#endif
-
-		// Modify using depth fade
-		#if USE_DFD 
-			thresholdStr = thresholdStr + depthFade;
-		#endif
-
-		// Pixel visibility (either fully solid or invisible) based on threshold
-		inkMask = (inkMask >= thresholdStr) ? 1.0 : 0.0;
-	#endif
-
-	float3 finalLayer = overlay.rgb;
-	// Combine and color layers based on EMM params if STAIN type
-	#if USE_STAIN1 || USE_STAIN2 || USE_STAIN3
-		float3 firstLayer;
-		float scratchMask = 0.0;
-		
-		float3 secondLayer;
-		float bloodMask   = 0.0;
-		
-		// Use masks for scratch/blood if enabled
-		LINEWORK_STAIN2( scratchMask = overlay.r * g_MaterialCol3_PS.x; )
-		LINEWORK_STAIN3( bloodMask   = overlay.g * g_MaterialCol3_PS.y; )
-
-		// Three-stage overlay | Linework > scratch > blood
-		firstLayer = lerp(WHITE, g_MaterialCol0_PS.rgb, inkMask);
-
-		secondLayer = firstLayer;
-		LINEWORK_STAIN2(secondLayer = lerp(firstLayer, g_MaterialCol1_PS.rgb, scratchMask));
+		#if !DISABLE_LINEWORK_THRESHOLD
+			float dFade = 0;
+			#if USE_DFD 
+				dFade = depthFade;
+			#endif
 	
-		finalLayer = secondLayer;
-		LINEWORK_STAIN3(finalLayer = lerp(secondLayer, g_MaterialCol2_PS.rgb, bloodMask));
-	#endif
-
-	// Apply to base color
-	float3 lineColor = baseColor.rgb * finalLayer;
+			eyeMask1 = (eyeMask1 >= g_MaterialCol0_PS.w + dFade) ? 1.0 : 0.0;
+			LINEWORK_MUT2(eyeMask2 = (eyeMask2 >= g_MaterialCol0_PS.w + dFade) ? 1.0 : 0.0);
+			LINEWORK_MUT3(eyeMask3 = (eyeMask3 >= g_MaterialCol0_PS.w + dFade) ? 1.0 : 0.0);
+		#endif
 	
-    // Faded look for HC Shading
-	// g_vParam11_PS.y is a strength modifier and only has a valid value when in the HC.
-    float contribution = lineColor.r + lineColor.g;
-	contribution = (baseColor.b * finalLayer.b) + contribution;
+			firstLayer = lerp(WHITE, g_MaterialCol0_PS.rgb, eyeMask1);
+	
+			secondLayer = firstLayer;
+			LINEWORK_MUT2(secondLayer = lerp(firstLayer, g_MaterialCol1_PS.rgb, eyeMask2));
+	
+			finalLayer = secondLayer;
+			LINEWORK_MUT3(finalLayer = lerp(secondLayer, g_MaterialCol2_PS.rgb, eyeMask3));
+		#endif
+	#endif
+	
+		// Apply to base color
+		float3 lineColor = baseColor.rgb * finalLayer;
+	
+		// Faded look for HC Shading
+		// g_vParam11_PS.y is a strength modifier and only has a valid value when in the HC.
+		float contribution = lineColor.r + lineColor.g;
+		contribution = (baseColor.b * finalLayer.b) + contribution;
 
-    bool suppressInk = (contribution <= 0.1);
-    float3 fadedInk = lerp(lineColor, thresholdStr * g_vParam11_PS.yyy, suppressInk);
+		bool suppressInk = (contribution <= 0.1);
+		float3 fadedInk = lerp(lineColor, thresholdStr * g_vParam11_PS.yyy, suppressInk);
 
-    // Lighting mode selection
-    baseColor.rgb =  ENABLE_INK_SPEC ? fadedInk : lineColor;
+		// Lighting mode selection
+		baseColor.rgb = ENABLE_INK_SPEC ? fadedInk : lineColor;
 	
 //-------------------------
 //Shine ramp overlay
@@ -1360,6 +1533,11 @@ void main(
 	// Alpha out
 	colorOut.a = finalColor.a;
 	glareOut.a = finalColor.a;
-
+	
+	// 0038 outpu
+	#if USE_0038
+		output2.xyzw = screenPos.zzzz;
+	#endif
+	
 	return;
 }
