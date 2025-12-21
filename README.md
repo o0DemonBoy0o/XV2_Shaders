@@ -1,11 +1,13 @@
 # DBXV2 Shader Decomp
 XV2 Pixel Shaders that have been decompiled and re-written for readability and easier use.
 I'm still learning HLSL, so it may not be the best, but I did the best I could to closely replicate the original math and such as best I could.
-"TOON_UNIF_Base.hlsl" is the basic body/clothing shader and has macros that can be used on compile to enable the various different shader types XV2 uses.
+"TOON_Base.hlsl" has macros that can be used on compile to enable the various different shader types XV2 uses.
 
 Macros are:
 - USE_UNIF
 - USE_DFD
+- USE_ENV
+- USE_ENV_ADD
 - USE_HAIR
 - USE_STN
 - USE_STAIN1
